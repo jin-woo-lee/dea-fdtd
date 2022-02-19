@@ -83,6 +83,13 @@ def sample_sine(n, f=None):
         wav = C.Vdc + C.Vpp * get_sine(freq)
     return wav
 
+def sample_batch(n, f=None, num_timestep=3):
+    #freq = np.random.randint(0,C.anal_sr // 2, size=n)
+    freq = np.random.randint(0,C.anal_sr // 4, size=n)
+    wav = np.random.uniform(C.Vpp,C.Vdc) + np.random.uniform(0,C.Vpp) * get_sine(freq) / 2
+    t = np.random.randint(0, wav.shape[-1]-num_timestep)
+    return wav[:,t:t+num_timestep]
+
 def minmax_normalize(x):
     x_min = x.reshape(x.size(0),-1).min(-1).values.reshape(x.size(0),1)
     x = x - x_min
