@@ -22,6 +22,7 @@ class Compensator(object):
         self.max_time = int(C.t_sup * C.anal_sr)
         self.n_sample = 2    # number of previous samples as input
         self.n_hidden = 64   # number of hidden units
+        self.gain = 1e3
         self.batch_size = args.batch_size
 
         #self.model = nn.Sequential(
@@ -63,7 +64,7 @@ class Compensator(object):
     #============================== 
     def smoothe(self, x):
         t = torch.ones_like(x).cumsum(-1).float() / self.max_time
-        return torch.tanh(t * 8)**2
+        return x * torch.tanh(t * 8)**2
         #return torch.tanh(t * 100)**2
     
     def step(self, lam_curr, lam_prev, ell_curr, actuation):
@@ -83,36 +84,17 @@ class Compensator(object):
     
         return lam_next, ell_next
     
-    def fdtd_lam(self, lam, ell_lam, inp):
-        lam_curr = lam
-        lam_prev = lam
+    def fdtd(self, lam, ell_lam, inp):
         for t in range(self.n_sample, self.max_time):
-            lam_next, ell_lam = self.step(lam_curr, lam_prev, ell_lam, inp)
-            lam_prev = lam_curr
-            lam_curr = lam_next
-        return lam_curr, ell_lam
-    def fdtd_dry(self, dry, ell_dry, byp):
-        dry_curr = dry
-        dry_prev = dry
-        for t in range(self.n_sample, self.max_time):
-            dry_next, ell_dry = self.step(dry_curr, dry_prev, ell_dry, byp)
-            dry_prev = dry_curr
-            dry_curr = dry_next
-        return dry_curr, ell_dry
+            lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
+        return lam, ell_lam
+
     def rescale_lam(self, lam):
         est = (1 - lam) * self.coef_w
         return est
     def rescale_dry(self, dry):
         dry = 1 - dry
         return dry
-    def maxwell(self, lam, ell_lam, inp):
-        lam_curr = lam
-        lam_prev = lam
-        for t in range(self.n_sample, self.max_time):
-            lam_next, ell_lam = self.step(lam_curr, lam_prev, ell_lam, (inp**.5) * (self.Vpp + self.Vdc))
-            lam_prev = lam_curr
-            lam_curr = lam_next
-        return lam, ell_lam
     
     def compensate(self, inp):
         #com = self.model(inp)
@@ -123,14 +105,16 @@ class Compensator(object):
         return com
     
     def amplify(self, com, inp):
-        com = com * (self.Vpp + self.Vdc)
-        byp = inp * (self.Vpp + self.Vdc)
+        #com = com * (self.Vpp + self.Vdc)
+        #byp = inp * (self.Vpp + self.Vdc)
+        com = com * self.gain
+        byp = inp * self.gain
         return com, byp
     
     def initialize_field(self, tar, inp):
         tar = tar - self.Vdc
         tar = tar / self.Vpp
-        inp = self.smoothe(inp) / (self.Vpp + self.Vdc)
+        inp = self.smoothe(inp / (self.Vpp + self.Vdc))
         lam = torch.ones_like(inp) * self.lam_0
         dry = torch.ones_like(inp) * self.lam_0
         ell_lam = torch.ones_like(inp) * self.ell_0
@@ -151,12 +135,12 @@ class Compensator(object):
     #============================== 
     # utils
     #============================== 
-    def plot_samples(self, samples):
+    def plot_samples(self, samples, model):
         st = time.time()
         inp, lam, est, dry = samples
         est_np = minmax_normalize(est).detach().cpu().numpy()
         dry_np = minmax_normalize(dry).detach().cpu().numpy()
-        os.makedirs(f"result/torch/{args.model}/test/plot", exist_ok=True)
+        os.makedirs(f"result/torch/{model}/test/plot", exist_ok=True)
         for i in range(self.batch_size):
     
             plt.figure(figsize=(10,10))
@@ -212,7 +196,7 @@ class Compensator(object):
             dry_mag, dry_phs = librosa.magphase(librosa.stft(dry_np[i,self.n_sample:]*1e4))
             librosa.display.specshow(np.log(dry_mag+1e-5), cmap='magma')
             plt.colorbar()
-            plt.savefig(f'result/torch/{args.model}/test/plot/{i}.png')
+            plt.savefig(f'result/torch/{model}/test/plot/{i}.png')
             plt.close()
     
     
@@ -234,18 +218,12 @@ class Compensator(object):
             dry_spec = scipy.signal.sosfilt(sos, dry_spec)
             dry_spec = np.absolute(np.fft.rfft(dry_spec))
             plt.plot(np.log(dry_spec))
-            plt.savefig(f'result/torch/{args.model}/test/plot/{i}-spec.png')
+            plt.savefig(f'result/torch/{model}/test/plot/{i}-spec.png')
             plt.close()
     
         tt = round(time.time() - st, 3)
         print(f"... done ({tt} sec)")
 
-
-
-    
-    #============================== 
-    # main routine 
-    #============================== 
     def load_dict(self, md,it):
         st = time.time()
         load_path = f'result/torch/{md}/ckpt/{it}.npz'
@@ -264,19 +242,22 @@ class Compensator(object):
         print(f"... done ({tt} sec)")
         return ckpt['it']
 
-
+    
+    #============================== 
+    # main routine 
+    #============================== 
     def forward(self, model, field):
         tar, inp, lam, dry, ell_lam, ell_dry  = field
         if model=="visco":
             com = self.compensate(inp)
             com, byp = self.amplify(com, inp)
-            lam, ell_lam = self.fdtd_lam(lam, ell_lam, com)
-            dry, ell_dry = self.fdtd_dry(dry, ell_dry, byp)
+            lam, ell_lam = self.fdtd(lam, ell_lam, com)
+            dry, ell_dry = self.fdtd(dry, ell_dry, byp)
         elif model=="maxwell":
-            com = inp
+            com = inp ** .5
             com, byp = self.amplify(com, inp)
-            lam, ell_lam = self.maxwell(lam, ell_lam, inp)
-            dry, ell_dry = self.fdtd_dry(dry, ell_dry, byp)
+            lam, ell_lam = self.fdtd(lam, ell_lam, com)
+            dry, ell_dry = self.fdtd(dry, ell_dry, byp)
         else:
             raise NotImplementedError("specify model in ['visco', 'maxwell']")
         est = self.rescale_lam(lam)
@@ -319,7 +300,7 @@ class Compensator(object):
             #    com = inp
             #    com, byp = self.amplify(com, inp)
             #    lam, ell_lam = self.maxwell(lam, ell_lam, inp)
-            #    dry, ell_dry = self.fdtd_dry(dry, ell_dry, byp)
+            #    dry, ell_dry = self.fdtd(dry, ell_dry, byp)
             #else:
             #    raise NotImplementedError("specify model in ['visco', 'maxwell']")
             #est = self.rescale_lam(lam_o)
@@ -343,11 +324,10 @@ class Compensator(object):
  
        # plot
        #self.plot_samples(samples)
- 
+  
 
     def test(self, args):
-        if args.model=='visco':
-            assert args.resume is not None, "specify model ckpt to load"
+        if args.resume is not None:
             load_dict(args.model, args.resume)
 
         print("-"*30)
@@ -369,7 +349,33 @@ class Compensator(object):
         print(f"Loss = {tot_loss} ({tt} sec)")
     
         # plot
-        self.plot_samples(samples)
+        self.plot_samples(samples, args.model)
+
+
+    def dry(self, args):
+        print("-"*30)
+        print(">>> start dry run")
+        it = time.time()
+    
+        # sample data
+        wav_np = sample_sine(self.batch_size, f=args.freq)
+        tar = torch.from_numpy(wav_np).cuda()
+        inp = torch.from_numpy(wav_np).cuda()
+        inp = self.smoothe(inp / (self.Vpp + self.Vdc))
+        lam = torch.ones_like(inp) * self.lam_0
+        dry = torch.ones_like(inp) * self.lam_0
+        ell_lam = torch.ones_like(inp) * self.ell_0
+        ell_dry = torch.ones_like(inp) * self.ell_0
+    
+        # run
+        dry, ell_dry = self.fdtd(dry, ell_dry, inp * self.gain)
+        dry = self.rescale_dry(dry)
+    
+        tt = round(time.time() - it, 3)
+        samples = [inp, dry, dry, dry]
+    
+        # plot
+        self.plot_samples(samples, "dry")
 
 
     def run(self, args):   
@@ -385,7 +391,8 @@ class Compensator(object):
             self.train(args)
         if args.test:   
             self.test(args)
-
+        if args.dry:   
+            self.dry(args)
 
 
 if __name__=='__main__':
@@ -408,6 +415,7 @@ if __name__=='__main__':
     #------------------------------ 
     parser.add_argument('--train', type=str2bool, default='false')
     parser.add_argument('--test',  type=str2bool, default='false')
+    parser.add_argument('--dry',  type=str2bool, default='false')
     #------------------------------ 
     parser.add_argument('--lr', type=float, default=1e-5)
     parser.add_argument('--n_iter', type=int, default=100000)

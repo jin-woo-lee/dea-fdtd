@@ -9,7 +9,7 @@
 Train the compensator. Training procedures can be found under `result` directory. Various training settings can be given by modifying parameters in `constants.py`.
 
 ```bash
-~$ python3 torch_model.py --model visco --train t --n_iter 10
+~$ python3 torch_models.py --model visco --train t --n_iter 10
 ```
 ### Simulate
 
@@ -17,7 +17,7 @@ Simulate the DEA's resulting strain for given voltage. You can also simulate the
 
 ```bash
 # Simulate Maxwell stress compensator
-~$ python3 torch_model.py --model maxwell --test t
-~$ python3 torch_model.py --model visco --test t --checkpoint $PATH_TO_PRETRAINED_MODEL
+~$ python3 torch_models.py --model maxwell --test t
+~$ python3 torch_models.py --model visco --test t --checkpoint $PATH_TO_PRETRAINED_MODEL
 ~$ python3 test_model.py --model maxwell --test t    # test DiffTaichi implementation
 ```
