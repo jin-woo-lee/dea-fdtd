@@ -141,7 +141,7 @@ class Compensator(object):
         est_np = minmax_normalize(est).detach().cpu().numpy()
         dry_np = minmax_normalize(dry).detach().cpu().numpy()
         os.makedirs(f"result/torch/{model}/test/plot", exist_ok=True)
-        for i in range(self.batch_size):
+        for i in range(len(inp)):
     
             plt.figure(figsize=(10,10))
             plt.subplot(421)
@@ -200,25 +200,39 @@ class Compensator(object):
             plt.close()
     
     
-            sos = scipy.signal.butter(10, 20, 'hp', fs=C.save_sr, output='sos')
-            pt = -10000
-            z = 2048
+            #sos = scipy.signal.butter(10, 100, 'hp', fs=C.save_sr, output='sos')
+            #pt = -10000
+            #z = 2048
+            #plt.figure(figsize=(10,10))
+            #plt.subplot(211)
+            #plt.title('est')
+            #est_s = est_np[i,pt:pt+z]
+            #est_s -= np.mean(est_s)
+            #est_s = scipy.signal.sosfilt(sos, est_s)
+            #est_spec = np.absolute(np.fft.rfft(est_s))
+            #plt.plot(np.log(est_spec))
+            #plt.subplot(212)
+            #plt.title('dry')
+            #dry_s = dry_np[i,pt:pt+z]
+            #dry_s -= np.mean(dry_s)
+            #dry_s = scipy.signal.sosfilt(sos, dry_s)
+            #dry_spec = np.absolute(np.fft.rfft(dry_s))
+            #plt.plot(np.log(dry_spec))
+            #plt.savefig(f'result/torch/{model}/test/plot/{i}-spec.png')
+            #plt.close()
+
+            lens = 10000
+            os.makedirs(f'result/torch/{model}/test/wave', exist_ok=True)
+            est_w = rms_normalize(est_np[i,lens:])
+            dry_w = rms_normalize(dry_np[i,lens:])
+            sf.write(f'result/torch/{model}/test/wave/{i}-est.wav', est_w, C.anal_sr, subtype='PCM_16')
+            sf.write(f'result/torch/{model}/test/wave/{i}-dry.wav', dry_w, C.anal_sr, subtype='PCM_16')
             plt.figure(figsize=(10,10))
             plt.subplot(211)
-            plt.title('est')
-            est_spec = est_np[i,pt:pt+z]
-            est_spec -= np.mean(est_spec)
-            est_spec = scipy.signal.sosfilt(sos, est_spec)
-            est_spec = np.absolute(np.fft.rfft(est_spec))
-            plt.plot(np.log(est_spec))
+            plt.plot(est_np[i,lens:])
             plt.subplot(212)
-            plt.title('dry')
-            dry_spec = dry_np[i,pt:pt+z]
-            dry_spec -= np.mean(dry_spec)
-            dry_spec = scipy.signal.sosfilt(sos, dry_spec)
-            dry_spec = np.absolute(np.fft.rfft(dry_spec))
-            plt.plot(np.log(dry_spec))
-            plt.savefig(f'result/torch/{model}/test/plot/{i}-spec.png')
+            plt.plot(dry_np[i,lens:])
+            plt.savefig(f'result/torch/{model}/test/wave/{i}.png')
             plt.close()
     
         tt = round(time.time() - st, 3)
@@ -255,6 +269,7 @@ class Compensator(object):
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
         elif model=="maxwell":
             com = inp ** .5
+            com = minmax_normalize(com, inp)
             com, byp = self.amplify(com, inp)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
@@ -262,6 +277,10 @@ class Compensator(object):
             raise NotImplementedError("specify model in ['visco', 'maxwell']")
         est = self.rescale_lam(lam)
         dry = self.rescale_dry(dry)
+
+        est = est - self.dc_component(est)
+        dry = dry - self.dc_component(dry)
+
         loss = F.mse_loss(est, inp)
         samples = [inp, lam, est, dry]
 
@@ -327,7 +346,7 @@ class Compensator(object):
   
 
     def test(self, args):
-        if args.resume is not None:
+        if args.resume is not None:#wav_np = wav_np[:self.max_time]
             load_dict(args.model, args.resume)
 
         print("-"*30)
@@ -335,7 +354,27 @@ class Compensator(object):
         it = time.time()
     
         # sample data
-        wav_np = sample_sine(self.batch_size, f=args.freq)
+        if args.data is not None:
+            wav_np, sr = sf.read(args.data)
+            print(f"... Loaded {args.data}")
+            print(f"... shape {wav_np.shape}")
+            if len(wav_np.shape) > 1:
+                if  wav_np.shape[0] > wav_np.shape[1]:
+                    wav_np = np.mean(wav_np, axis=1)
+                elif  wav_np.shape[0] < wav_np.shape[1]:
+                    wav_np = np.mean(wav_np, axis=0)
+                print(f"... mixdown to {wav_np.shape}")
+            if sr != C.anal_sr:
+                #wav_np = librosa.resample(wav_np, sr, C.anal_sr) #print(f"... resampled sr {sr} to {C.anal_sr}")
+                C.anal_sr = sr
+            if wav_np.shape[0] > self.max_time:
+                #wav_np = wav_np[:self.max_time]
+                #print(f"... trimmed to max length {self.max_time}")
+                self.max_time = len(wav_np)
+            wav_np = C.Vdc + C.Vpp * wav_np
+            wav_np = np.expand_dims(wav_np, axis=0)
+        else:
+            wav_np = sample_sine(self.batch_size, f=args.freq)
         tar = torch.from_numpy(wav_np).cuda()
         inp = torch.from_numpy(wav_np).cuda()
         field = self.initialize_field(tar, inp)
@@ -351,6 +390,13 @@ class Compensator(object):
         # plot
         self.plot_samples(samples, args.model)
 
+    def dc_component(self, signal):
+        dry = torch.ones_like(signal) * self.lam_0
+        ell_dry = torch.ones_like(signal) * self.ell_0
+    
+        dry, ell_dry = self.fdtd(dry, ell_dry, signal * self.gain)
+        dry = self.rescale_dry(dry)
+        return dry
 
     def dry(self, args):
         print("-"*30)
@@ -362,14 +408,9 @@ class Compensator(object):
         tar = torch.from_numpy(wav_np).cuda()
         inp = torch.from_numpy(wav_np).cuda()
         inp = self.smoothe(inp / (self.Vpp + self.Vdc))
-        lam = torch.ones_like(inp) * self.lam_0
-        dry = torch.ones_like(inp) * self.lam_0
-        ell_lam = torch.ones_like(inp) * self.ell_0
-        ell_dry = torch.ones_like(inp) * self.ell_0
-    
+
         # run
-        dry, ell_dry = self.fdtd(dry, ell_dry, inp * self.gain)
-        dry = self.rescale_dry(dry)
+        dry = self.dc_component(inp)
     
         tt = round(time.time() - it, 3)
         samples = [inp, dry, dry, dry]
@@ -410,6 +451,7 @@ if __name__=='__main__':
     parser.add_argument('--resume', type=int, default=None)
     parser.add_argument('--model', type=str, default='visco')
     #------------------------------ 
+    parser.add_argument('--data', type=str, default=None)
     parser.add_argument('--freq', type=float, default=None)
     parser.add_argument('--seed', type=int, default=0)
     #------------------------------ 

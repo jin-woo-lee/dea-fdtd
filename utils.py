@@ -92,11 +92,16 @@ def sample_batch(n, f=None, num_timestep=None):
         wav = wav[:,t:t+num_timestep]
     return wav
 
-def minmax_normalize(x):
+def minmax_normalize(x, y=None):
     x_min = x.reshape(x.size(0),-1).min(-1).values.reshape(x.size(0),1)
     x = x - x_min
     x_max = x.reshape(x.size(0),-1).max(-1).values.reshape(x.size(0),1)
     x = x / x_max
+    if y is not None:
+        y_min = y.reshape(y.size(0),-1).min(-1).values.reshape(y.size(0),1)
+        y_max = y.reshape(y.size(0),-1).max(-1).values.reshape(y.size(0),1)
+        x = x * (y_max - y_min)
+        x = x + y_min
     return x
 
 def stretch_to_capacitance(lam):
@@ -106,4 +111,19 @@ def stretch_to_capacitance(lam):
     A = C.a_0 / lam
     d = C.z_0 * lam
     return C.eps * A / d
+
+
+def cal_rms(amp):
+    return np.sqrt(np.mean(np.square(amp), axis=-1))
+
+def rms_normalize(wav, ref_dB=-23.0):
+    # RMS normalize
+    eps = np.finfo(np.float32).eps
+    rms = cal_rms(wav)
+    rms_dB = 20*np.log(rms/1) # rms_dB
+    ref_linear = np.power(10, ref_dB/20.)
+    gain = ref_linear / np.sqrt(np.mean(np.square(wav), axis=-1) + eps)
+    wav = gain * wav
+    return wav
+
 
