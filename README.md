@@ -17,7 +17,7 @@ Simulate the DEA's resulting strain for given voltage. You can also simulate the
 
 ```bash
 # Simulate Maxwell stress compensator
-~$ python3 torch_models.py --model maxwell --test t
-~$ python3 torch_models.py --model visco --test t --checkpoint $PATH_TO_PRETRAINED_MODEL
-~$ python3 test_model.py --model maxwell --test t    # test DiffTaichi implementation
+~$ python3 torch_models.py --model maxwell --test
+~$ python3 torch_models.py --model visco --test --checkpoint $PATH_TO_PRETRAINED_MODEL
+~$ python3 test_model.py --model maxwell --test    # test DiffTaichi implementation
 ```

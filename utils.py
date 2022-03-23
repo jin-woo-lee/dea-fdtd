@@ -87,8 +87,8 @@ def sample_batch(n, f=None, num_timestep=None):
     #freq = np.random.randint(0,C.anal_sr // 2, size=n)
     freq = np.random.randint(0,C.anal_sr // 4, size=n)
     wav = np.random.uniform(C.Vpp,C.Vdc) + np.random.uniform(0,C.Vpp) * get_sine(freq) / 2
-    t = np.random.randint(0, wav.shape[-1]-num_timestep)
-    if num_timestep is not None:
+    if num_timestep:
+        t = np.random.randint(0, wav.shape[-1]-num_timestep)
         wav = wav[:,t:t+num_timestep]
     return wav
 

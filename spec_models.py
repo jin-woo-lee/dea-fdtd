@@ -26,15 +26,22 @@ class Compensator(object):
         self.gain = 1e3
         self.batch_size = args.batch_size
 
-        #self.model = nn.Sequential(
-        #    nn.Linear(self.n_sample, self.n_hidden),
-        #    nn.ReLU(),
-        #    nn.Linear(self.n_hidden, self.n_hidden),
-        #    nn.ReLU(),
-        #    nn.Linear(self.n_hidden, 1),
-        #)
-        self.model = nn.GRU(self.n_sample, self.n_hidden, num_layers=5, batch_first=True).cuda()
-        self.proj  = nn.Linear(self.n_hidden, 1).cuda()
+        nch = 32
+        ker = 5
+        stride = 1
+        padding = 4
+        dilation = 2
+        self.model = nn.Sequential(
+            nn.Conv1d(1, nch, ker, stride=stride, padding=padding, dilation=dilation),
+            nn.LeakyReLU(negative_slope=0.3),
+            nn.BatchNorm1d(nch),
+            #------------------------------ 
+            nn.Conv1d(nch, nch, ker, stride=stride, padding=padding, dilation=dilation),
+            nn.LeakyReLU(negative_slope=0.3),
+            nn.BatchNorm1d(nch),
+            #------------------------------ 
+            nn.Conv1d(nch, 1, 1, bias=False),
+        ).cuda()
 
         self.coef_w = 1
         self.eps  = C.eps
@@ -53,12 +60,14 @@ class Compensator(object):
         self.dt  = 1 / C.anal_sr
        
         self.optimizer = torch.optim.Adam(
-            params=list(self.model.parameters())+list(self.proj.parameters()),
+            params=list(self.model.parameters()),
             lr=args.lr,
             betas=(0.9, 0.999),
             amsgrad=False,
             weight_decay=0.01 ,
         )
+
+        self.spec_loss = SpecLoss(n_fft=1024, win_length=1024, hop_length=256).cuda()
 
     #============================== 
     # forward subroutine 
@@ -85,9 +94,29 @@ class Compensator(object):
     
         return lam_next, ell_next
     
+    #def fdtd(self, lam, ell_lam, inp):
+    #    for t in range(self.n_sample, self.max_time):
+    #        lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
+    #        #lam[:,t] = lam[:,t-1] * inp[:,t]
+    #    return lam, ell_lam
+
     def fdtd(self, lam, ell_lam, inp):
+        lam_t0 = F.pad(lam, (0,2), value=1.)
+        inputs = F.pad(inp, (2,0))
+        ell_t0 = F.pad(ell_lam, (0,2), value=1.)
+        t_mask = torch.zeros_like(lam_t0)
         for t in range(self.n_sample, self.max_time):
-            lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
+            #lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
+            lam_t2 = lam_t0.roll(2,-1)    # lam_{t-2}
+            lam_t1 = lam_t0.roll(1,-1)    # lam_{t-1}
+            ell_t1 = ell_t0.roll(1,-1)    # lam_{t-1}
+
+            t_mask[:,t] = 1
+            lam, ell = self.step(lam_t2, lam_t1, ell_t1, inputs)
+            lam_t0 = lam_t0 + t_mask * lam - t_mask
+            ell_t0 = ell_t0 + t_mask * ell - t_mask
+            t_mask[:,t] = 0
+
         return lam, ell_lam
 
     def rescale_lam(self, lam):
@@ -99,9 +128,7 @@ class Compensator(object):
     
     def compensate(self, inp):
         #com = self.model(inp)
-        self.model.flatten_parameters()
-        com, _ = self.model(inp.unsqueeze(1))
-        com = self.proj(com).squeeze()
+        com = self.model(inp.unsqueeze(1))
         com = torch.sigmoid(com)
         return com
     
@@ -115,23 +142,14 @@ class Compensator(object):
     def initialize_field(self, tar, inp):
         tar = tar - self.Vdc
         tar = tar / self.Vpp
-        inp = self.smoothe(inp / (self.Vpp + self.Vdc))
-        lam = torch.ones_like(inp) * self.lam_0
-        dry = torch.ones_like(inp) * self.lam_0
-        ell_lam = torch.ones_like(inp) * self.ell_0
-        ell_dry = torch.ones_like(inp) * self.ell_0
+        tar = tar.float().cuda()
+        inp = self.smoothe(inp / (self.Vpp + self.Vdc)).float().cuda()
+        lam = torch.ones_like(inp).float().cuda() * self.lam_0
+        dry = torch.ones_like(inp).float().cuda() * self.lam_0
+        ell_lam = torch.ones_like(inp).float().cuda() * self.ell_0
+        ell_dry = torch.ones_like(inp).float().cuda() * self.ell_0
         return tar, inp, lam, dry, ell_lam, ell_dry 
 
-    def initialize_train_field(self, tar, inp):
-        #tar = tar - self.Vdc
-        tar = tar / (self.Vdc + self.Vpp)
-        inp = inp / (self.Vpp + self.Vdc)
-        lam = inp[:,2:]
-        dry = inp[:,2:]
-        inp = inp[:,:2]
-        ell_lam = lam
-        ell_dry = dry
-        return tar, inp, lam, dry, ell_lam, ell_dry 
     
     #============================== 
     # utils
@@ -266,6 +284,7 @@ class Compensator(object):
         if model=="visco":
             com = self.compensate(inp)
             com, byp = self.amplify(com, inp)
+            com = com.squeeze(1)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
         elif model=="maxwell":
@@ -279,9 +298,13 @@ class Compensator(object):
         est = self.rescale_lam(lam)
         dry = self.rescale_dry(dry)
 
-        est = est - self.dc_component(est)
-        dry = dry - self.dc_component(dry)
+        #est = est - self.dc_component(est)
+        #dry = dry - self.dc_component(dry)
 
+        #loss = F.mse_loss(est, inp)
+        print(est.shape)
+        print(inp.shape)
+        #loss = self.spec_loss(est, inp)
         loss = F.mse_loss(est, inp)
         samples = [inp, lam, est, dry]
 
@@ -294,39 +317,12 @@ class Compensator(object):
         print(">>> start train")
         for i in range(args.n_iter):
             # sample data
-            wav_np = sample_batch(self.batch_size, f=args.freq, num_timestep=5)
-            tar = torch.from_numpy(wav_np[:,-1]).float()
-            inp = torch.from_numpy(wav_np[:,:4]).float()
-            field = self.initialize_train_field(tar, inp)
+            wav_np = sample_batch(self.batch_size, f=args.freq)
+            tar = torch.from_numpy(wav_np).float()
+            inp = torch.from_numpy(wav_np).float()
+            field = self.initialize_field(tar, inp)
             
-            # inp : v[t-4 ~ t-1]
-            # prv : v[t-4 ~ t-3]
-            # lam : x[t-2 ~ t-1]
-            # tar : x[t]
-            # com : v[t-1]
-            tar, prv, lam, dry, ell_lam, ell_dry  = field
-            inp = inp.cuda()
-            prv = prv.cuda()
-            tar = tar.cuda()
-            lam = lam.cuda()
-            dry = dry.cuda()
-            ell_lam = ell_lam.cuda()
-            ell_dry = ell_dry.cuda()
-            if args.model=="visco":
-                com = self.compensate(prv)
-                est, _ = self.step(lam[:,0], lam[:,1], ell_lam[:,1], com * 1e4)
-                dry, _ = self.step(dry[:,0], dry[:,1], ell_dry[:,1], tar * 1e4)
-            #elif args.model=="maxwell":
-            #    com = inp
-            #    com, byp = self.amplify(com, inp)
-            #    lam, ell_lam = self.maxwell(lam, ell_lam, inp)
-            #    dry, ell_dry = self.fdtd(dry, ell_dry, byp)
-            #else:
-            #    raise NotImplementedError("specify model in ['visco', 'maxwell']")
-            #est = self.rescale_lam(lam_o)
-            #dry = self.rescale_dry(dry_o)
-
-            loss = F.mse_loss(est, tar)
+            loss, samples = self.forward(args.model, field)
             
             self.optimizer.zero_grad()
             loss.backward()
