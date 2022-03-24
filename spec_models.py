@@ -27,10 +27,13 @@ class Compensator(object):
         self.batch_size = args.batch_size
 
         nch = 32
-        ker = 5
+        ker = 7
         stride = 1
-        padding = 4
-        dilation = 2
+        dilation = 3
+        # out = floor((inp + 2*padding - dilation * (ker-1)) / stride) + 1
+        padding = (dilation * (ker-1) - 1) // 2 + 1
+        #print(self.max_time)
+        #print(np.floor((self.max_time + 2*padding - dilation * (ker-1)) / stride) + 1)
         self.model = nn.Sequential(
             nn.Conv1d(1, nch, ker, stride=stride, padding=padding, dilation=dilation),
             nn.LeakyReLU(negative_slope=0.3),
@@ -104,20 +107,19 @@ class Compensator(object):
         lam_t0 = F.pad(lam, (0,2), value=1.)
         inputs = F.pad(inp, (2,0))
         ell_t0 = F.pad(ell_lam, (0,2), value=1.)
-        t_mask = torch.zeros_like(lam_t0)
+        t_mask = torch.zeros_like(lam_t0[0]).unsqueeze(0)
+        t_mask[0,self.n_sample] = 1
         for t in range(self.n_sample, self.max_time):
-            #lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
             lam_t2 = lam_t0.roll(2,-1)    # lam_{t-2}
             lam_t1 = lam_t0.roll(1,-1)    # lam_{t-1}
             ell_t1 = ell_t0.roll(1,-1)    # lam_{t-1}
 
-            t_mask[:,t] = 1
             lam, ell = self.step(lam_t2, lam_t1, ell_t1, inputs)
             lam_t0 = lam_t0 + t_mask * lam - t_mask
             ell_t0 = ell_t0 + t_mask * ell - t_mask
-            t_mask[:,t] = 0
+            t_mask = t_mask.roll(1, -1)
 
-        return lam, ell_lam
+        return lam_t0, ell_t0
 
     def rescale_lam(self, lam):
         est = (1 - lam) * self.coef_w
@@ -287,25 +289,26 @@ class Compensator(object):
             com = com.squeeze(1)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
+            inp = F.pad(inp, (2,0))
+
         elif model=="maxwell":
             com = inp ** .5
             com = minmax_normalize(com, inp)
             com, byp = self.amplify(com, inp)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
+
         else:
             raise NotImplementedError("specify model in ['visco', 'maxwell']")
+
         est = self.rescale_lam(lam)
         dry = self.rescale_dry(dry)
 
         #est = est - self.dc_component(est)
         #dry = dry - self.dc_component(dry)
 
-        #loss = F.mse_loss(est, inp)
-        print(est.shape)
-        print(inp.shape)
-        #loss = self.spec_loss(est, inp)
         loss = F.mse_loss(est, inp)
+        #loss = self.spec_loss(est, inp)
         samples = [inp, lam, est, dry]
 
         return loss, samples
@@ -328,11 +331,11 @@ class Compensator(object):
             loss.backward()
             self.optimizer.step()
             
-            if i % 10 == 0:
-                tot_loss = round(loss.item(), 5)
+            if i % 1 == 0:
+                tot_loss = round(loss.item(), 3)
                 LOSS.append(tot_loss)
-                avg_loss = round(sum(LOSS) / len(LOSS), 5)
-                #print(f"Iter {i};\t Loss = {tot_loss},\t Avg = {avg_loss}")
+                avg_loss = round(sum(LOSS) / len(LOSS), 3)
+                print(f"... Iter {i};\t Loss = {tot_loss},\t Avg = {avg_loss}")
                 #print(f"byp {tar[0]}")
                 #print(f"com {com[0]}")
                 #print(f"tar {tar[0]}")
