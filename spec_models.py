@@ -97,29 +97,33 @@ class Compensator(object):
     
         return lam_next, ell_next
     
-    #def fdtd(self, lam, ell_lam, inp):
-    #    for t in range(self.n_sample, self.max_time):
-    #        lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
-    #        #lam[:,t] = lam[:,t-1] * inp[:,t]
-    #    return lam, ell_lam
-
     def fdtd(self, lam, ell_lam, inp):
-        lam_t0 = F.pad(lam, (0,2), value=1.)
-        inputs = F.pad(inp, (2,0))
-        ell_t0 = F.pad(ell_lam, (0,2), value=1.)
-        t_mask = torch.zeros_like(lam_t0[0]).unsqueeze(0)
-        t_mask[0,self.n_sample] = 1
+        print(lam.requires_grad, ell_lam.requires_grad)
         for t in range(self.n_sample, self.max_time):
-            lam_t2 = lam_t0.roll(2,-1)    # lam_{t-2}
-            lam_t1 = lam_t0.roll(1,-1)    # lam_{t-1}
-            ell_t1 = ell_t0.roll(1,-1)    # lam_{t-1}
+            lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1].clone(),
+                                               lam[:,t-2].clone(),
+                                               ell_lam[:,t-1].clone(),
+                                               inp[:,t])
+            #lam[:,t] = lam[:,t-1] * inp[:,t]
+        return lam, ell_lam
 
-            lam, ell = self.step(lam_t2, lam_t1, ell_t1, inputs)
-            lam_t0 = lam_t0 + t_mask * lam - t_mask
-            ell_t0 = ell_t0 + t_mask * ell - t_mask
-            t_mask = t_mask.roll(1, -1)
+    #def fdtd(self, lam, ell_lam, inp):
+    #    lam_t0 = F.pad(lam, (0,2), value=1.)
+    #    inputs = F.pad(inp, (2,0))
+    #    ell_t0 = F.pad(ell_lam, (0,2), value=1.)
+    #    t_mask = torch.zeros_like(lam_t0[0]).unsqueeze(0)
+    #    t_mask[0,self.n_sample] = 1
+    #    for t in range(self.n_sample, self.max_time):
+    #        lam_t2 = lam_t0.roll(2,-1)    # lam_{t-2}
+    #        lam_t1 = lam_t0.roll(1,-1)    # lam_{t-1}
+    #        ell_t1 = ell_t0.roll(1,-1)    # lam_{t-1}
 
-        return lam_t0, ell_t0
+    #        lam, ell = self.step(lam_t2, lam_t1, ell_t1, inputs)
+    #        lam_t0 = lam_t0 + t_mask * lam - t_mask
+    #        ell_t0 = ell_t0 + t_mask * ell - t_mask
+    #        t_mask = t_mask.roll(1, -1)
+
+    #    return lam_t0, ell_t0
 
     def rescale_lam(self, lam):
         est = (1 - lam) * self.coef_w
@@ -289,7 +293,7 @@ class Compensator(object):
             com = com.squeeze(1)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
-            inp = F.pad(inp, (2,0))
+            #inp = F.pad(inp, (2,0))
 
         elif model=="maxwell":
             com = inp ** .5
@@ -435,6 +439,7 @@ class Compensator(object):
             self.test(args)
         if args.dry:   
             self.dry(args)
+
 
 
 if __name__=='__main__':
