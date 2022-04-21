@@ -11,6 +11,7 @@ from tqdm import tqdm
 import constants as C
 from utils import *
 from loss import SpecLoss
+from networks import Model
 
 import torch
 import torch.nn as nn
@@ -22,21 +23,11 @@ class Compensator(object):
         self.ell_0 = 1.
         self.max_time = int(C.t_sup * C.anal_sr)
         self.n_sample = 2    # number of previous samples as input
-        self.n_hidden = 64   # number of hidden units
         self.gain = 1e3
         self.batch_size = args.batch_size
 
-        #self.model = nn.Sequential(
-        #    nn.Linear(self.n_sample, self.n_hidden),
-        #    nn.ReLU(),
-        #    nn.Linear(self.n_hidden, self.n_hidden),
-        #    nn.ReLU(),
-        #    nn.Linear(self.n_hidden, 1),
-        #)
-        self.model = nn.GRU(self.n_sample, self.n_hidden, num_layers=5, batch_first=True).cuda()
-        self.proj  = nn.Linear(self.n_hidden, 1).cuda()
+        self.model = Model().cuda()
 
-        self.coef_w = 1
         self.eps  = C.eps
         self.mu   = C.mu
         self.z_0  = C.z_0
@@ -53,12 +44,14 @@ class Compensator(object):
         self.dt  = 1 / C.anal_sr
        
         self.optimizer = torch.optim.Adam(
-            params=list(self.model.parameters())+list(self.proj.parameters()),
+            params=list(self.model.parameters()),
             lr=args.lr,
             betas=(0.9, 0.999),
             amsgrad=False,
             weight_decay=0.01 ,
         )
+
+        self.spec_loss = SpecLoss(n_fft=1024, win_length=1024, hop_length=256).cuda()
 
     #============================== 
     # forward subroutine 
@@ -87,21 +80,15 @@ class Compensator(object):
     
     def fdtd(self, lam, ell_lam, inp):
         for t in range(self.n_sample, self.max_time):
-            lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1], lam[:,t-2], ell_lam[:,t-1], inp[:,t])
+            lam[:,t], ell_lam[:,t] = self.step(lam[:,t-1].clone(),
+                                               lam[:,t-2].clone(),
+                                               ell_lam[:,t-1].clone(),
+                                               inp[:,t])
         return lam, ell_lam
 
-    def rescale_lam(self, lam):
-        est = (1 - lam) * self.coef_w
-        return est
-    def rescale_dry(self, dry):
-        dry = 1 - dry
-        return dry
-    
     def compensate(self, inp):
         #com = self.model(inp)
-        self.model.flatten_parameters()
-        com, _ = self.model(inp.unsqueeze(1))
-        com = self.proj(com).squeeze()
+        com = self.model(inp.unsqueeze(1))
         com = torch.sigmoid(com)
         return com
     
@@ -115,129 +102,13 @@ class Compensator(object):
     def initialize_field(self, tar, inp):
         tar = tar - self.Vdc
         tar = tar / self.Vpp
-        inp = self.smoothe(inp / (self.Vpp + self.Vdc))
-        lam = torch.ones_like(inp) * self.lam_0
-        dry = torch.ones_like(inp) * self.lam_0
-        ell_lam = torch.ones_like(inp) * self.ell_0
-        ell_dry = torch.ones_like(inp) * self.ell_0
+        tar = tar.float().cuda()
+        inp = self.smoothe(inp / (self.Vpp + self.Vdc)).float().cuda()
+        lam = torch.ones_like(inp).float().cuda() * self.lam_0
+        dry = torch.ones_like(inp).float().cuda() * self.lam_0
+        ell_lam = torch.ones_like(inp).float().cuda() * self.ell_0
+        ell_dry = torch.ones_like(inp).float().cuda() * self.ell_0
         return tar, inp, lam, dry, ell_lam, ell_dry 
-
-    def initialize_train_field(self, tar, inp):
-        #tar = tar - self.Vdc
-        tar = tar / (self.Vdc + self.Vpp)
-        inp = inp / (self.Vpp + self.Vdc)
-        lam = inp[:,2:]
-        dry = inp[:,2:]
-        inp = inp[:,:2]
-        ell_lam = lam
-        ell_dry = dry
-        return tar, inp, lam, dry, ell_lam, ell_dry 
-    
-    #============================== 
-    # utils
-    #============================== 
-    def plot_samples(self, samples, model):
-        st = time.time()
-        inp, lam, est, dry = samples
-        est_np = minmax_normalize(est).detach().cpu().numpy()
-        dry_np = minmax_normalize(dry).detach().cpu().numpy()
-        os.makedirs(f"result/torch/{model}/test/plot", exist_ok=True)
-        for i in range(len(inp)):
-    
-            plt.figure(figsize=(10,10))
-            plt.subplot(421)
-            plt.plot(inp.detach().cpu().numpy()[i,self.n_sample:], label='inp')
-            plt.legend()
-            #plt.subplot(423)
-            #plt.plot(com.detach().cpu().numpy()[i,self.n_sample:], label='com')
-            #plt.legend()
-            plt.subplot(423)
-            #plt.plot(lam.detach().cpu().numpy()[i,:1000], label='lam')
-            plt.plot(lam.detach().cpu().numpy()[i,self.n_sample:], label='lam')
-            plt.legend()
-            plt.subplot(425)
-            ##plt.plot(ell_lam.detach().cpu().numpy()[i,:1000], label='ell')
-            #plt.plot(ell_lam.detach().cpu().numpy()[i,self.n_sample:], label='ell')
-            #plt.plot(est.detach().cpu().numpy()[i,-10:], label='est')
-            #plt.plot(est.detach().cpu().numpy()[i,self.n_sample:], label='est')
-            plt.plot(est_np[i,self.n_sample:], label='est')
-            plt.legend()
-            plt.subplot(427)
-            #plt.plot(dry.detach().cpu().numpy()[i,:1000], label='dry')
-            #plt.plot(dry.detach().cpu().numpy()[i,self.n_sample:], label='dry')
-            #plt.plot(stretch_to_capacitance(dry_np[i,self.n_sample:]), label='dry')
-            plt.plot(dry_np[i,self.n_sample:], label='dry')
-            plt.legend()
-    
-            plt.subplot(422)
-            plt.title('inp')
-            inp_mag, inp_phs = librosa.magphase(librosa.stft(inp.detach().cpu().numpy()[i,self.n_sample:]))
-            librosa.display.specshow(np.log(inp_mag+1e-5), cmap='magma')
-            plt.colorbar()
-            #plt.subplot(422)
-            #plt.title('com')
-            #com_mag, com_phs = librosa.magphase(librosa.stft(com.detach().cpu().numpy()[i,self.n_sample:]))
-            #librosa.display.specshow(np.log(com_mag+1e-5), cmap='magma')
-            #plt.colorbar()
-            plt.subplot(424)
-            plt.title('lam')
-            lam_mag, lam_phs = librosa.magphase(librosa.stft(lam.detach().cpu().numpy()[i,self.n_sample:]))
-            librosa.display.specshow(np.log(lam_mag+1e-5), cmap='magma')
-            plt.colorbar()
-            plt.subplot(426)
-            plt.title('est')
-            #est_mag, est_phs = librosa.magphase(librosa.stft(est.detach().cpu().numpy()[i,self.n_sample:]))
-            est_np[i] *= 1e3
-            est_mag, est_phs = librosa.magphase(librosa.stft(est_np[i,self.n_sample:]))
-            librosa.display.specshow(np.log(est_mag+1e-5), cmap='magma')
-            plt.colorbar()
-            plt.subplot(428)
-            plt.title('dry')
-            #dry_mag, dry_phs = librosa.magphase(librosa.stft(dry.detach().cpu().numpy()[i,self.n_sample:]*1e4))
-            dry_mag, dry_phs = librosa.magphase(librosa.stft(dry_np[i,self.n_sample:]*1e4))
-            librosa.display.specshow(np.log(dry_mag+1e-5), cmap='magma')
-            plt.colorbar()
-            plt.savefig(f'result/torch/{model}/test/plot/{i}.png')
-            plt.close()
-    
-    
-            #sos = scipy.signal.butter(10, 100, 'hp', fs=C.save_sr, output='sos')
-            #pt = -10000
-            #z = 2048
-            #plt.figure(figsize=(10,10))
-            #plt.subplot(211)
-            #plt.title('est')
-            #est_s = est_np[i,pt:pt+z]
-            #est_s -= np.mean(est_s)
-            #est_s = scipy.signal.sosfilt(sos, est_s)
-            #est_spec = np.absolute(np.fft.rfft(est_s))
-            #plt.plot(np.log(est_spec))
-            #plt.subplot(212)
-            #plt.title('dry')
-            #dry_s = dry_np[i,pt:pt+z]
-            #dry_s -= np.mean(dry_s)
-            #dry_s = scipy.signal.sosfilt(sos, dry_s)
-            #dry_spec = np.absolute(np.fft.rfft(dry_s))
-            #plt.plot(np.log(dry_spec))
-            #plt.savefig(f'result/torch/{model}/test/plot/{i}-spec.png')
-            #plt.close()
-
-            lens = 10000
-            os.makedirs(f'result/torch/{model}/test/wave', exist_ok=True)
-            est_w = rms_normalize(est_np[i,lens:])
-            dry_w = rms_normalize(dry_np[i,lens:])
-            sf.write(f'result/torch/{model}/test/wave/{i}-est.wav', est_w, C.anal_sr, subtype='PCM_16')
-            sf.write(f'result/torch/{model}/test/wave/{i}-dry.wav', dry_w, C.anal_sr, subtype='PCM_16')
-            plt.figure(figsize=(10,10))
-            plt.subplot(211)
-            plt.plot(est_np[i,lens:])
-            plt.subplot(212)
-            plt.plot(dry_np[i,lens:])
-            plt.savefig(f'result/torch/{model}/test/wave/{i}.png')
-            plt.close()
-    
-        tt = round(time.time() - st, 3)
-        print(f"... done ({tt} sec)")
 
     def load_dict(self, md,it):
         st = time.time()
@@ -266,85 +137,62 @@ class Compensator(object):
         if model=="visco":
             com = self.compensate(inp)
             com, byp = self.amplify(com, inp)
+            com = com.squeeze(1)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
+
         elif model=="maxwell":
             com = inp ** .5
             com = minmax_normalize(com, inp)
             com, byp = self.amplify(com, inp)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
             dry, ell_dry = self.fdtd(dry, ell_dry, byp)
+
         else:
             raise NotImplementedError("specify model in ['visco', 'maxwell']")
-        est = self.rescale_lam(lam)
-        dry = self.rescale_dry(dry)
 
-        est = est - self.dc_component(est)
-        dry = dry - self.dc_component(dry)
+        est = 1 - lam
+        dry = 1 - dry
 
-        loss = F.mse_loss(est, inp)
-        samples = [inp, lam, est, dry]
+        #est = est - self.dc_component(est)
+        #dry = dry - self.dc_component(dry)
+
+        #loss = F.mse_loss(est, inp)
+        loss = self.spec_loss(est, inp)
+        samples = [inp, com, lam, est, dry]
 
         return loss, samples
     
     def train(self, args):
 
+        np.random.seed(args.seed)
+        torch.manual_seed(args.seed)
+
         LOSS = []
         print("-"*30)
         print(">>> start train")
+        self.model.train()
         for i in range(args.n_iter):
             # sample data
-            wav_np = sample_batch(self.batch_size, f=args.freq, num_timestep=5)
-            tar = torch.from_numpy(wav_np[:,-1]).float()
-            inp = torch.from_numpy(wav_np[:,:4]).float()
-            field = self.initialize_train_field(tar, inp)
+            wav_np = sample_batch(self.batch_size, f=args.freq)
+            tar = torch.from_numpy(wav_np).float()
+            inp = torch.from_numpy(wav_np).float()
+            field = self.initialize_field(tar, inp)
             
-            # inp : v[t-4 ~ t-1]
-            # prv : v[t-4 ~ t-3]
-            # lam : x[t-2 ~ t-1]
-            # tar : x[t]
-            # com : v[t-1]
-            tar, prv, lam, dry, ell_lam, ell_dry  = field
-            inp = inp.cuda()
-            prv = prv.cuda()
-            tar = tar.cuda()
-            lam = lam.cuda()
-            dry = dry.cuda()
-            ell_lam = ell_lam.cuda()
-            ell_dry = ell_dry.cuda()
-            if args.model=="visco":
-                com = self.compensate(prv)
-                est, _ = self.step(lam[:,0], lam[:,1], ell_lam[:,1], com * 1e4)
-                dry, _ = self.step(dry[:,0], dry[:,1], ell_dry[:,1], tar * 1e4)
-            #elif args.model=="maxwell":
-            #    com = inp
-            #    com, byp = self.amplify(com, inp)
-            #    lam, ell_lam = self.maxwell(lam, ell_lam, inp)
-            #    dry, ell_dry = self.fdtd(dry, ell_dry, byp)
-            #else:
-            #    raise NotImplementedError("specify model in ['visco', 'maxwell']")
-            #est = self.rescale_lam(lam_o)
-            #dry = self.rescale_dry(dry_o)
-
-            loss = F.mse_loss(est, tar)
+            loss, samples = self.forward(args.model, field)
             
             self.optimizer.zero_grad()
             loss.backward()
             self.optimizer.step()
             
-            if i % 10 == 0:
-                tot_loss = round(loss.item(), 5)
+            if i % 1 == 0:
+                tot_loss = round(loss.item(), 3)
                 LOSS.append(tot_loss)
-                avg_loss = round(sum(LOSS) / len(LOSS), 5)
-                #print(f"Iter {i};\t Loss = {tot_loss},\t Avg = {avg_loss}")
-                #print(f"byp {tar[0]}")
-                #print(f"com {com[0]}")
-                #print(f"tar {tar[0]}")
-                #print(f"est {est[0]}")
-                #print("="*30)
+                avg_loss = round(sum(LOSS) / len(LOSS), 3)
+                print(f"... Iter {i};\t Loss = {tot_loss},\t Avg = {avg_loss}")
  
-       # plot
-       #self.plot_samples(samples)
+            if i % 10 == 0:
+                plot_samples(samples, args.model, i)
   
 
     def test(self, args):
@@ -355,6 +203,7 @@ class Compensator(object):
         print(">>> start test")
         it = time.time()
     
+        self.model.eval()
         # sample data
         if args.data is not None:
             wav_np, sr = sf.read(args.data)
@@ -390,14 +239,14 @@ class Compensator(object):
         print(f"Loss = {tot_loss} ({tt} sec)")
     
         # plot
-        self.plot_samples(samples, args.model)
+        plot_samples(samples, args.model, 'eval')
 
     def dc_component(self, signal):
         dry = torch.ones_like(signal) * self.lam_0
         ell_dry = torch.ones_like(signal) * self.ell_0
     
         dry, ell_dry = self.fdtd(dry, ell_dry, signal * self.gain)
-        dry = self.rescale_dry(dry)
+        dry = 1 - dry
         return dry
 
     def dry(self, args):
@@ -415,10 +264,10 @@ class Compensator(object):
         dry = self.dc_component(inp)
     
         tt = round(time.time() - it, 3)
-        samples = [inp, dry, dry, dry]
+        samples = [inp, dry, dry, dry, dry]
     
         # plot
-        self.plot_samples(samples, "dry")
+        plot_samples(samples, "dry", 'eval')
 
 
     def run(self, args):   
@@ -428,7 +277,7 @@ class Compensator(object):
         print(f"... batch size: {self.batch_size}")
         print(f"... max time  : {self.max_time}")
         print(f"... n sample  : {self.n_sample}")
-        print(f"... n hidden  : {self.n_hidden}")
+        print(f"... gain      : {self.gain}")
     
         if args.train:   
             self.train(args)
@@ -436,6 +285,7 @@ class Compensator(object):
             self.test(args)
         if args.dry:   
             self.dry(args)
+
 
 
 if __name__=='__main__':

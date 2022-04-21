@@ -1,8 +1,10 @@
+import os
+import torch
 import numpy as np
 import librosa
 import scipy.signal
 import matplotlib.pyplot as plt
-
+import soundfile as sf
 import constants as C
 
 def renormalize(x, y, eps=1e-12):
@@ -60,6 +62,75 @@ def plot(t, i, freq, lam, vol, n_fft=1024, t_len=2048, do_filter=True):
     plt.savefig(f'plot/{i}.png')
     plt.close()
     return np.expand_dims(x, -1)
+
+ 
+def plot_samples(samples, model, n):
+    inp, com, lam, est, dry = samples
+    #est = minmax_normalize(est)
+    #dry = minmax_normalize(dry)
+    if isinstance(est, torch.Tensor):
+        inp = inp.detach().cpu().numpy()
+        com = com.detach().cpu().numpy()
+        lam = lam.detach().cpu().numpy()
+        est = est.detach().cpu().numpy()
+        dry = dry.detach().cpu().numpy()
+
+    os.makedirs(f"result/torch/{model}/test/plot", exist_ok=True)
+    for i in range(len(inp)):
+
+        plt.figure(figsize=(10,10))
+        plt.subplot(421)
+        plt.plot(inp[i], label='inp')
+        plt.legend()
+        plt.subplot(423)
+        #---------- 
+        plt.plot(com[i], label='com')
+        #plt.plot(lam[i], label='lam')
+        #---------- 
+        plt.legend()
+        plt.subplot(425)
+        plt.plot(est[i], label='est')
+        plt.legend()
+        plt.subplot(427)
+        #plt.plot(stretch_to_capacitance(dry[i]), label='dry')
+        plt.plot(dry[i], label='dry')
+        plt.legend()
+
+        plt.subplot(422)
+        plt.title('inp')
+        inp_mag, inp_phs = librosa.magphase(librosa.stft(inp[i]))
+        librosa.display.specshow(np.log(inp_mag+1e-5), cmap='magma')
+        plt.colorbar()
+        plt.subplot(424)
+        #---------- 
+        #plt.title('lam')
+        #lam_mag, lam_phs = librosa.magphase(librosa.stft(lam[i]))
+        #librosa.display.specshow(np.log(lam_mag+1e-5), cmap='magma')
+        plt.title('com')
+        com_mag, com_phs = librosa.magphase(librosa.stft(com[i]))
+        librosa.display.specshow(np.log(com_mag+1e-5), cmap='magma')
+        #---------- 
+        plt.colorbar()
+        plt.subplot(426)
+        plt.title('est')
+        est[i] *= 1e3
+        est_mag, est_phs = librosa.magphase(librosa.stft(est[i]))
+        librosa.display.specshow(np.log(est_mag+1e-5), cmap='magma')
+        plt.colorbar()
+        plt.subplot(428)
+        plt.title('dry')
+        dry_mag, dry_phs = librosa.magphase(librosa.stft(dry[i]*1e4))
+        librosa.display.specshow(np.log(dry_mag+1e-5), cmap='magma')
+        plt.colorbar()
+        plt.savefig(f'result/torch/{model}/test/plot/{n}_{i}.png')
+        plt.close()
+
+        os.makedirs(f'result/torch/{model}/test/wave', exist_ok=True)
+        est_w = rms_normalize(est[i])
+        dry_w = rms_normalize(dry[i])
+        sf.write(f'result/torch/{model}/test/wave/{i}-est.wav', est_w, C.anal_sr, subtype='PCM_16')
+        sf.write(f'result/torch/{model}/test/wave/{i}-dry.wav', dry_w, C.anal_sr, subtype='PCM_16')
+
 
 def get_sine(freqs):
     """
@@ -125,5 +196,7 @@ def rms_normalize(wav, ref_dB=-23.0):
     gain = ref_linear / np.sqrt(np.mean(np.square(wav), axis=-1) + eps)
     wav = gain * wav
     return wav
+
+
 
 
