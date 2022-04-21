@@ -76,9 +76,11 @@ def plot_samples(samples, model, n):
         dry = dry.detach().cpu().numpy()
 
     os.makedirs(f"result/torch/{model}/test/plot", exist_ok=True)
-    for i in range(len(inp)):
+    figure = []
+    #for i in range(len(inp)):
+    for i in range(1):
 
-        plt.figure(figsize=(10,10))
+        fig = plt.figure(figsize=(10,10))
         plt.subplot(421)
         plt.plot(inp[i], label='inp')
         plt.legend()
@@ -123,6 +125,8 @@ def plot_samples(samples, model, n):
         librosa.display.specshow(np.log(dry_mag+1e-5), cmap='magma')
         plt.colorbar()
         plt.savefig(f'result/torch/{model}/test/plot/{n}_{i}.png')
+
+        figure.append(fig)
         plt.close()
 
         os.makedirs(f'result/torch/{model}/test/wave', exist_ok=True)
@@ -130,7 +134,7 @@ def plot_samples(samples, model, n):
         dry_w = rms_normalize(dry[i])
         sf.write(f'result/torch/{model}/test/wave/{i}-est.wav', est_w, C.anal_sr, subtype='PCM_16')
         sf.write(f'result/torch/{model}/test/wave/{i}-dry.wav', dry_w, C.anal_sr, subtype='PCM_16')
-
+    return figure
 
 def get_sine(freqs):
     """

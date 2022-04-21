@@ -16,6 +16,7 @@ from networks import Model
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+import wandb
 
 class Compensator(object):
     def __init__(self, args):
@@ -167,11 +168,20 @@ class Compensator(object):
 
         np.random.seed(args.seed)
         torch.manual_seed(args.seed)
+        os.environ['WANDB_START_METHOD'] = 'thread'
+        logger = wandb.init(
+            entity="szin",
+            project="dea",
+            name="fdtd",
+        )
+        logger.config.update(args)
+
 
         LOSS = []
         print("-"*30)
         print(">>> start train")
         self.model.train()
+        logger.watch(self.model)
         for i in range(args.n_iter):
             # sample data
             wav_np = sample_batch(self.batch_size, f=args.freq)
@@ -183,6 +193,7 @@ class Compensator(object):
             
             self.optimizer.zero_grad()
             loss.backward()
+            #print(self.model.fc.bias.grad.data, self.model.fc.bias.data)
             self.optimizer.step()
             
             if i % 1 == 0:
@@ -191,8 +202,16 @@ class Compensator(object):
                 avg_loss = round(sum(LOSS) / len(LOSS), 3)
                 print(f"... Iter {i};\t Loss = {tot_loss},\t Avg = {avg_loss}")
  
-            if i % 10 == 0:
-                plot_samples(samples, args.model, i)
+            if i % 5 == 0:
+                plots = plot_samples(samples, args.model, i)
+                log = {
+                    "plots": wandb.Image(plots[0]),
+                }
+                losses = {
+                    "total": tot_loss,
+                }
+                logger.log({**losses, **log})
+
   
 
     def test(self, args):
@@ -311,9 +330,9 @@ if __name__=='__main__':
     parser.add_argument('--test',  action="store_true", help="when this flag is given, evaluate model")
     parser.add_argument('--dry',  type=str2bool, default='false')
     #------------------------------ 
-    parser.add_argument('--lr', type=float, default=1e-5)
+    parser.add_argument('--lr', type=float, default=1e-4)
     parser.add_argument('--n_iter', type=int, default=100000)
-    parser.add_argument('--batch_size', type=int, default=4)
+    parser.add_argument('--batch_size', type=int, default=1024)
     #------------------------------ 
 
     args = parser.parse_args()
