@@ -4,6 +4,7 @@ import numpy as np
 import librosa
 import scipy.signal
 import matplotlib.pyplot as plt
+import torch.nn.functional as F
 import soundfile as sf
 import constants as C
 
@@ -161,7 +162,7 @@ def sample_sine(n, f=None):
 def sample_batch(n, f=None, num_timestep=None):
     #freq = np.random.randint(0,C.anal_sr // 2, size=n)
     freq = np.random.randint(0,C.anal_sr // 4, size=n)
-    wav = np.random.uniform(C.Vpp,C.Vdc) + np.random.uniform(0,C.Vpp) * get_sine(freq) / 2
+    wav = np.random.uniform(C.Vpp, C.Vdc) + np.random.uniform(0,C.Vpp) * get_sine(freq) / 2
     if num_timestep:
         t = np.random.randint(0, wav.shape[-1]-num_timestep)
         wav = wav[:,t:t+num_timestep]
@@ -201,6 +202,16 @@ def rms_normalize(wav, ref_dB=-23.0):
     wav = gain * wav
     return wav
 
+def batch_min(x):
+    shape = [s if i == 0 else 1 for i, s in enumerate(x.shape)]
+    floor = x.view(x.size(0),-1).min(-1).values
+    floor = floor.view(shape)
+    return x - floor, floor
 
+
+def diff_loss(x):
+    x = F.pad(x, (1,1), mode='replicate')
+    y = x - x.roll(1,-1)
+    return torch.norm(y[:,1:], p='fro')
 
 

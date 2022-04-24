@@ -24,7 +24,6 @@ class Compensator(object):
         self.ell_0 = 1.
         self.max_time = int(C.t_sup * C.anal_sr)
         self.n_sample = 2    # number of previous samples as input
-        self.gain = 1e3
         self.batch_size = args.batch_size
 
         self.model = Model().cuda()
@@ -43,23 +42,25 @@ class Compensator(object):
         self.mb  = C.pre**(-1)
         self.mc  = C.pre**(-1) - C.pre**2
         self.dt  = 1 / C.anal_sr
+
+        self.spec_loss = SpecLoss(n_fft=1024, win_length=1024, hop_length=256).cuda()
        
         self.optimizer = torch.optim.Adam(
-            params=list(self.model.parameters()),
+            params=list(self.model.parameters()) \
+                  +list(self.spec_loss.parameters()),
             lr=args.lr,
             betas=(0.9, 0.999),
             amsgrad=False,
             weight_decay=0.01 ,
         )
 
-        self.spec_loss = SpecLoss(n_fft=1024, win_length=1024, hop_length=256).cuda()
-
     #============================== 
     # forward subroutine 
     #============================== 
     def smoothe(self, x):
         t = torch.ones_like(x).cumsum(-1).float() / self.max_time
-        return x * torch.tanh(t * 8)**2
+        shaper = torch.tanh(t * 8)**2
+        return x * shaper * shaper.flip(-1)
         #return torch.tanh(t * 100)**2
     
     def step(self, lam_curr, lam_prev, ell_curr, actuation):
@@ -88,48 +89,48 @@ class Compensator(object):
         return lam, ell_lam
 
     def compensate(self, inp):
-        #com = self.model(inp)
         com = self.model(inp.unsqueeze(1))
-        com = torch.sigmoid(com)
         return com
     
     def amplify(self, com, inp):
-        #com = com * (self.Vpp + self.Vdc)
-        #byp = inp * (self.Vpp + self.Vdc)
-        com = com * self.gain
-        byp = inp * self.gain
+        com = com * (C.Vpp + C.Vdc)
+        byp = inp * (C.Vpp + C.Vdc)
         return com, byp
     
     def initialize_field(self, tar, inp):
-        tar = tar - self.Vdc
-        tar = tar / self.Vpp
+        tar = tar / (self.Vdc + self.Vpp)
+        inp = inp / (self.Vdc + self.Vpp)
         tar = tar.float().cuda()
-        inp = self.smoothe(inp / (self.Vpp + self.Vdc)).float().cuda()
+        inp = inp.float().cuda()
         lam = torch.ones_like(inp).float().cuda() * self.lam_0
         dry = torch.ones_like(inp).float().cuda() * self.lam_0
         ell_lam = torch.ones_like(inp).float().cuda() * self.ell_0
         ell_dry = torch.ones_like(inp).float().cuda() * self.ell_0
         return tar, inp, lam, dry, ell_lam, ell_dry 
 
-    def load_dict(self, md,it):
+    def save_ckpt(self, checkpoint_dir, md, it):
+        os.makedirs(checkpoint_dir, exist_ok=True)
+        checkpoint_state = {
+            "model": self.model.state_dict(),
+            "loss" : self.spec_loss.state_dict(),
+            "optim": self.optimizer.state_dict(),
+            "iter" : it,
+        }
+        checkpoint_path = os.path.join(checkpoint_dir,'{}_{}.pt'.format(md, it))
+        torch.save(checkpoint_state, checkpoint_path)
+
+    def load_dict(self, md, it):
         st = time.time()
         load_path = f'result/torch/{md}/ckpt/{it}.npz'
         print(f">>> load ckpt: {load_path}")
         ckpt = np.load(load_path)
-        w_ih.from_numpy(ckpt['w_ih'])
-        w_hh.from_numpy(ckpt['w_hh'])
-        w_ho.from_numpy(ckpt['w_ho'])
-        b_ih.from_numpy(ckpt['b_ih'])
-        b_hh.from_numpy(ckpt['b_hh'])
-        b_ho.from_numpy(ckpt['b_ho'])
-        coef_w.from_numpy(ckpt['coef_w'])
-        coef_b.from_numpy(ckpt['coef_b'])
-        #lr.from_numpy(ckpt['lr'])
+        self.model.load_state_dict(ckpt['model'])
+        self.spec_loss.load_state_dict(ckpt['loss'])
+        self.optimizer.load_state_dict(ckpt['optim']),
         tt = round(time.time() - st, 3)
         print(f"... done ({tt} sec)")
         return ckpt['it']
 
-    
     #============================== 
     # main routine 
     #============================== 
@@ -137,6 +138,8 @@ class Compensator(object):
         tar, inp, lam, dry, ell_lam, ell_dry  = field
         if model=="visco":
             com = self.compensate(inp)
+            com = self.smoothe(com)
+            inp = self.smoothe(inp)
             com, byp = self.amplify(com, inp)
             com = com.squeeze(1)
             lam, ell_lam = self.fdtd(lam, ell_lam, com)
@@ -155,19 +158,18 @@ class Compensator(object):
         est = 1 - lam
         dry = 1 - dry
 
+        com = com / (C.Vpp + C.Vdc)
+
         #est = est - self.dc_component(est)
         #dry = dry - self.dc_component(dry)
 
-        #loss = F.mse_loss(est, inp)
-        loss = self.spec_loss(est, inp)
+        loss = self.spec_loss(est, inp, guide=True)
         samples = [inp, com, lam, est, dry]
 
         return loss, samples
     
     def train(self, args):
 
-        np.random.seed(args.seed)
-        torch.manual_seed(args.seed)
         os.environ['WANDB_START_METHOD'] = 'thread'
         logger = wandb.init(
             entity="szin",
@@ -212,6 +214,8 @@ class Compensator(object):
                 }
                 logger.log({**losses, **log})
 
+            if i % 100 == 0:
+                self.save_ckpt(f"result/torch/{args.model}/test/ckpt", args.model, i)
   
 
     def test(self, args):
@@ -264,7 +268,7 @@ class Compensator(object):
         dry = torch.ones_like(signal) * self.lam_0
         ell_dry = torch.ones_like(signal) * self.ell_0
     
-        dry, ell_dry = self.fdtd(dry, ell_dry, signal * self.gain)
+        dry, ell_dry = self.fdtd(dry, ell_dry, signal * (C.Vpp + C.Vdc))
         dry = 1 - dry
         return dry
 
@@ -296,7 +300,6 @@ class Compensator(object):
         print(f"... batch size: {self.batch_size}")
         print(f"... max time  : {self.max_time}")
         print(f"... n sample  : {self.n_sample}")
-        print(f"... gain      : {self.gain}")
     
         if args.train:   
             self.train(args)
@@ -331,13 +334,14 @@ if __name__=='__main__':
     parser.add_argument('--dry',  type=str2bool, default='false')
     #------------------------------ 
     parser.add_argument('--lr', type=float, default=1e-4)
-    parser.add_argument('--n_iter', type=int, default=100000)
-    parser.add_argument('--batch_size', type=int, default=1024)
+    parser.add_argument('--n_iter', type=int, default=10000000)
+    parser.add_argument('--batch_size', type=int, default=128)
     #------------------------------ 
 
     args = parser.parse_args()
 
     np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
     compensator = Compensator(args)
     compensator.run(args)
 
